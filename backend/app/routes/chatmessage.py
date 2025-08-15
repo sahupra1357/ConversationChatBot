@@ -1,4 +1,4 @@
-from fastapi import Form
+from fastapi import Form, Body
 from llama_index.llms.openai import OpenAI
 from llama_index.core.settings import Settings
 from llama_index.core.node_parser import SentenceSplitter
@@ -8,6 +8,14 @@ from app.config import local_settings
 from llama_index.core.agent.workflow import ReActAgent
 from app.arxiv_rag import get_lazy_load_and_query
 from fastapi import APIRouter
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+
+
+class ChatRequest(BaseModel):
+    message: str
+    conversation_id: Optional[str] = None
+    message_history: Optional[List[Dict[str, Any]]] = None
 
 
 # Initialize OpenAI LLM and LlamaIndex ReActAgent
@@ -34,15 +42,68 @@ agent.update_prompts({"react_header": PromptTemplate(system_prompt)})
 router = APIRouter(tags=["chat"])
 
 @router.post("/chat")
-async def chat_endpoint(
-    message: str = Form(...),
-    memory: str = Form(""),
-):
-    # For now, just append memory to the message if provided
-    user_message = message
-    if memory:
-        user_message = f"[Memory: {memory}]\n{message}"
-    # response = agent.chat(user_message)
-    response = await agent.run(user_message)
-    print(f"User message: {user_message}")
-    return {"response": response}
+async def chat_endpoint(chat_request: ChatRequest):
+    """
+    Process a chat request with JSON data.
+    Can receive conversation history for context.
+    """
+    print(f"Received chat request: {chat_request}")
+    
+    # Extract the message
+    user_message = chat_request.message
+    
+    # Include conversation history if provided
+    context = ""
+    if chat_request.message_history:
+        # Format message history as context
+        for msg in chat_request.message_history:
+            sender = "User" if not msg.get("isBot", False) else "Assistant"
+            context += f"{sender}: {msg.get('content', '')}\n"
+        
+        if context:
+            user_message = f"[Previous conversation:\n{context}]\n\nCurrent message: {user_message}"
+    
+    print(f"Processed user message: {user_message}")
+    
+    try:
+        # Get response from agent
+        response = await agent.run(user_message)
+        #print(f"Agent response: {response[:100]}...")
+        # print(f"Agent response: is back...", response)
+        print(f"Agent response: is back...")
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Error in agent.run: {error_msg}")
+        
+        # More detailed error handling with specific messages
+        if "Failed to fetch from arXiv" in error_msg:
+            if "503" in error_msg:
+                response = ("I'm having trouble connecting to the arXiv research database at the moment. "
+                          "The server is temporarily unavailable (HTTP 503), which usually indicates "
+                          "either maintenance or high traffic. Please try again in a few minutes. "
+                          "In the meantime, I can still help answer your question based on my general knowledge.")
+            elif "429" in error_msg or "Too Many Requests" in error_msg:
+                response = ("I've reached the rate limit for arXiv's API. "
+                          "This happens when there are many research requests in a short period. "
+                          "Please try again in a few minutes. "
+                          "I can still help with questions that don't require the latest research papers.")
+            elif "timeout" in error_msg.lower():
+                response = ("The connection to arXiv's research database timed out. "
+                          "This might be due to network issues or high server load. "
+                          "Please try again shortly. "
+                          "In the meantime, I can help with questions based on my general knowledge.")
+            else:
+                response = ("I'm having trouble connecting to the arXiv research database at the moment. "
+                          "This could be due to network issues or rate limiting. "
+                          "I can still help answer your question based on my general knowledge. "
+                          "What would you like to know?")
+        elif "vector store" in error_msg.lower() or "qdrant" in error_msg.lower():
+            response = ("I'm experiencing an issue with my research database. "
+                      "This is likely a temporary problem with how I store and retrieve research information. "
+                      "Let me try to answer based on my general knowledge instead.")
+        else:
+            response = (f"I encountered an error while processing your request. "
+                      f"Error details: {error_msg}. "
+                      f"Please try again with a different question.")
+    
+    return {"response": response, "conversation_id": chat_request.conversation_id}
