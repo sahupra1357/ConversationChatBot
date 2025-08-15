@@ -100,23 +100,176 @@ export const useCreateMessage = () => {
                 queryKey: ["messages", variables.conversationId]
             });
             
-            // Generate automatic bot response if the message is from the user
+            // Generate AI response if the message is from the user
             if (!variables.isBot) {
                 setTimeout(async () => {
-                    const botResponses = [
-                        "That's a great question! Let me help you with that.",
-                        "I understand what you're looking for. Here's what I can suggest:",
-                        "Thanks for asking! Based on your question, I'd recommend:",
-                        "Great point! Let me break this down for you:",
-                        "I'm here to help! For your specific needs, consider this approach:"
-                    ];
-                    
-                    const randomResponse = botResponses[Math.floor(Math.random() * botResponses.length)];
-                    
                     try {
+                        console.log(`Requesting AI response from ${API_BASE}/chat`);
+                        
+                        // Get all messages for context
+                        const existingMessages = await queryClient.fetchQuery({
+                            queryKey: ["messages", variables.conversationId],
+                        }) as Message[] || [];
+                        
+                        // Simplify the message history to just the essential fields
+                        const simplifiedHistory = Array.isArray(existingMessages) 
+                            ? existingMessages.map((msg: Message) => ({
+                                content: msg.content,
+                                isBot: msg.isBot,
+                                timestamp: msg.createdAt
+                              })).slice(-10) // Only include the last 10 messages for context
+                            : [];
+                        
+                        // Call the /chat API endpoint
+                        console.log("Sending chat request with payload:", {
+                            conversation_id: variables.conversationId,
+                            message: variables.content,
+                            message_history: simplifiedHistory
+                        });
+                        
+                        const response = await fetch(`${API_BASE}/chat`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                conversation_id: variables.conversationId,
+                                message: variables.content,
+                                message_history: simplifiedHistory
+                            }),
+                        });
+                        
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            console.error(`Chat API Error (${response.status}): ${errorText}`);
+                            
+                            // For 422 errors, log more details to help debugging
+                            if (response.status === 422) {
+                                console.error("422 Validation Error. This usually means the request body doesn't match what the API expects.");
+                                console.error("Request body was:", JSON.stringify({
+                                    conversation_id: variables.conversationId,
+                                    message: variables.content,
+                                    message_history: existingMessages
+                                }, null, 2));
+                            }
+                            
+                            throw new Error(`Chat API response was not ok: ${response.status} ${errorText}`);
+                        }
+                        
+                        const chatResponse = await response.json();
+                        console.log("AI response received (raw):", JSON.stringify(chatResponse, null, 2));
+                        
+                        // Extract the response text, handling different response structures
+                        let responseText = "";
+                        
+                        // Try multiple approaches to extract the text based on different response formats
+                        if (typeof chatResponse === 'object') {
+                            console.log("Response is an object, checking different properties");
+                            
+                            // Handle the specific nested structure from ReActAgent
+                            if (chatResponse.response && 
+                                typeof chatResponse.response === 'object' && 
+                                chatResponse.response.response && 
+                                typeof chatResponse.response.response === 'object') {
+                                
+                                console.log("Found nested response.response.blocks structure");
+                                const nestedResponse = chatResponse.response.response;
+                                
+                                if (nestedResponse.blocks && Array.isArray(nestedResponse.blocks)) {
+                                    console.log("Found blocks array with", nestedResponse.blocks.length, "blocks");
+                                    const textBlocks = nestedResponse.blocks
+                                        .filter((block: any) => block && block.block_type === 'text')
+                                        .map((block: any) => block.text || '');
+                                        
+                                    console.log("Extracted text blocks:", textBlocks);
+                                    responseText = textBlocks.join('\n\n');
+                                }
+                            }
+                            // Option 1: Direct string response
+                            else if (chatResponse.response && typeof chatResponse.response === 'string') {
+                                console.log("Found direct string response");
+                                responseText = chatResponse.response;
+                            } 
+                            // Option 2: Array of strings
+                            else if (Array.isArray(chatResponse)) {
+                                console.log("Response is an array");
+                                responseText = chatResponse.map((item: any) => 
+                                    typeof item === 'string' ? item : JSON.stringify(item)
+                                ).join('\n\n');
+                            }
+                            // Option 3: Response property is an array
+                            else if (Array.isArray(chatResponse.response)) {
+                                console.log("Response.response is an array");
+                                responseText = chatResponse.response.map((item: any) => 
+                                    typeof item === 'string' ? item : JSON.stringify(item)
+                                ).join('\n\n');
+                            }
+                            // Option 4: Nested object structure
+                            else if (typeof chatResponse.response === 'object' && chatResponse.response !== null) {
+                                console.log("Response has a nested object structure, checking properties:", 
+                                    Object.keys(chatResponse.response));
+                                
+                                const complexResponse = chatResponse.response;
+                                
+                                // Option 4.1: Blocks array
+                                if (complexResponse.blocks && Array.isArray(complexResponse.blocks)) {
+                                    console.log("Found blocks array with", complexResponse.blocks.length, "blocks");
+                                    const textBlocks = complexResponse.blocks
+                                        .filter((block: any) => block && block.block_type === 'text')
+                                        .map((block: any) => block.text || '');
+                                        
+                                    console.log("Extracted text blocks:", textBlocks);
+                                    responseText = textBlocks.join('\n\n');
+                                } 
+                                // Option 4.2: Content field
+                                else if (complexResponse.content && typeof complexResponse.content === 'string') {
+                                    console.log("Found content field");
+                                    responseText = complexResponse.content;
+                                }
+                                // Option 4.3: Text field
+                                else if (complexResponse.text && typeof complexResponse.text === 'string') {
+                                    console.log("Found text field");
+                                    responseText = complexResponse.text;
+                                }
+                                // Option 4.4: Message field
+                                else if (complexResponse.message && typeof complexResponse.message === 'string') {
+                                    console.log("Found message field");
+                                    responseText = complexResponse.message;
+                                }
+                            }
+                            
+                            // Option 5: Top-level content property
+                            if (!responseText && chatResponse.content && typeof chatResponse.content === 'string') {
+                                console.log("Found top-level content field");
+                                responseText = chatResponse.content;
+                            }
+                            
+                            // If nothing else works, try to stringify the whole object
+                            if (!responseText && typeof chatResponse === 'object') {
+                                try {
+                                    // If it's a complex object, try to extract meaningful text
+                                    const stringified = JSON.stringify(chatResponse);
+                                    if (stringified.length < 1000) { // Don't use if it's too large
+                                        responseText = "Response: " + stringified;
+                                    }
+                                } catch (e) {
+                                    console.error("Error stringifying response:", e);
+                                }
+                            }
+                        }
+                        
+                        // Fallback if we couldn't extract response text
+                        if (!responseText) {
+                            console.warn("Could not extract text from response. Using default message.");
+                            responseText = "I received a response but couldn't process it correctly. Please try again.";
+                        }
+                        
+                        console.log("Final extracted response text:", responseText);
+                        
+                        // Create a new bot message with the AI response
                         await createMessage({
                             conversationId: variables.conversationId,
-                            content: randomResponse,
+                            content: responseText,
                             isBot: true
                         });
                         
@@ -125,9 +278,20 @@ export const useCreateMessage = () => {
                             queryKey: ["messages", variables.conversationId]
                         });
                     } catch (error) {
-                        console.error("Error creating bot response:", error);
+                        console.error("Error getting AI response:", error);
+                        
+                        // Fallback to a simple error message if the API call fails
+                        await createMessage({
+                            conversationId: variables.conversationId,
+                            content: "I'm sorry, I encountered an error processing your request. Please try again later.",
+                            isBot: true
+                        });
+                        
+                        queryClient.invalidateQueries({
+                            queryKey: ["messages", variables.conversationId]
+                        });
                     }
-                }, 1000 + Math.random() * 2000); // Random delay between 1-3 seconds
+                }, 500); // Shorter delay for API-based responses
             }
         },
         onError: (error: Error) => {

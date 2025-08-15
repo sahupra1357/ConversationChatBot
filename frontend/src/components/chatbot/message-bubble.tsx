@@ -33,7 +33,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
         </div>
         <div className="flex-1 max-w-3xl">
           <div className="bg-white rounded-2xl rounded-tl-md shadow-sm border border-gray-200 p-4">
-            <p className="text-gray-800 leading-relaxed">{message.content}</p>
+            <div className="text-gray-800 leading-relaxed whitespace-pre-wrap">{message.content}</div>
           </div>
           <div className="flex items-center justify-between mt-2 px-1">
             <span className="text-xs text-gray-400">AI Assistant • {new Date(message.createdAt).toLocaleTimeString()}</span>
@@ -74,7 +74,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     <div className="flex items-start space-x-3 justify-end animate-fade-in">
       <div className="flex-1 max-w-3xl">
         <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-2xl rounded-tr-md shadow-sm p-4 ml-auto">
-          <p className="text-white leading-relaxed">{message.content}</p>
+          <div className="text-white leading-relaxed whitespace-pre-wrap">{message.content}</div>
         </div>
         <div className="flex items-center justify-end mt-2 px-1">
           <span className="text-xs text-gray-400">You • {new Date(message.createdAt).toLocaleTimeString()}</span>

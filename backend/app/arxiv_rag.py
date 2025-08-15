@@ -4,6 +4,7 @@ import requests
 import uuid
 import xml.etree.ElementTree as ET
 from threading import Thread
+from datetime import datetime
 from llama_index.core import VectorStoreIndex, ServiceContext
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -16,9 +17,11 @@ from llama_index.core.settings import Settings
 from llama_index.core.schema import TextNode
 from llama_index.core.node_parser import SentenceSplitter
 from PyPDF2 import PdfReader
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from llama_index.llms.openai import OpenAI
 import io
+import time
+import random
 
 import os
 from dotenv import load_dotenv
@@ -28,6 +31,11 @@ from app.observability import init_observability
 # Initialize observability
 init_observability()
 
+# Constants for retry logic
+MAX_RETRIES = 5
+RETRY_DELAY_BASE = 1.5  # seconds
+RETRY_JITTER = 1.0  # random jitter in seconds to add to delay
+
 
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", 6333))
@@ -36,6 +44,11 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 MAX_RESULTS = int(os.getenv("MAX_RESULTS", 2))
 SHORT_SUMMARY_LENGTH = int(os.getenv("SHORT_SUMMARY_LENGTH", 100))
 VECTOR_DIM = int(os.getenv("VECTOR_DIM", 1536))
+
+# Retry configuration for external API calls
+MAX_RETRIES = 3
+RETRY_DELAY_BASE = 2  # Base delay in seconds between retries
+RETRY_JITTER = 0.5  # Random jitter added to retry delay
 
 class ArxivRAG:
     def __init__(self,
@@ -73,11 +86,90 @@ class ArxivRAG:
         self.vector_store = QdrantVectorStore(client=self.qdrant_client, collection_name=collection_name)
 
     def fetch_arxiv_feed(self, query):
+        """
+        Fetch arXiv papers based on a query with improved error handling and retry logic.
+        """
         url = f"http://export.arxiv.org/api/query?search_query=all:{query}&sortBy=submittedDate&sortOrder=descending&max_results={self.max_results}"
-        response = requests.get(url)
-        if response.status_code != 200:
-            raise Exception("Failed to fetch from arXiv")
-        return response.text
+        print(f"Querying arXiv API with URL: {url}")
+        
+        retry_count = 0
+        last_exception = None
+        
+        while retry_count < MAX_RETRIES:
+            try:
+                # Add user-agent to mimic a browser (sometimes helps with rate limiting)
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
+                }
+                
+                # Make the request with exponential backoff if retrying
+                if retry_count > 0:
+                    # Calculate delay with exponential backoff and jitter
+                    delay = RETRY_DELAY_BASE * (2 ** (retry_count - 1)) + random.uniform(0, RETRY_JITTER)
+                    print(f"Retry {retry_count}/{MAX_RETRIES} after {delay:.2f} seconds...")
+                    time.sleep(delay)
+                
+                # Make the request
+                response = requests.get(url, headers=headers, timeout=30)
+                
+                # Handle 503 specifically with a more detailed message
+                if response.status_code == 503:
+                    print(f"arXiv API returned 503 Service Unavailable. This usually indicates rate limiting or temporary maintenance.")
+                    retry_count += 1
+                    last_exception = Exception(f"arXiv API is temporarily unavailable (HTTP 503). Retry {retry_count}/{MAX_RETRIES}")
+                    continue
+                
+                # For other status codes, proceed as normal
+                response.raise_for_status()
+                
+                print(f"arXiv API response status: {response.status_code}")
+                
+                # Verify we got valid XML data
+                content_type = response.headers.get('Content-Type', '')
+                content_length = len(response.text)
+                
+                if 'xml' not in content_type.lower() and content_length < 100:
+                    print(f"Warning: Response may not be valid XML. Content-Type: {content_type}")
+                    print(f"Response preview: {response.text[:100]}...")
+                
+                # Success! Return the response
+                return response.text
+                
+            except requests.exceptions.HTTPError as e:
+                # Log the error
+                error_msg = f"arXiv API HTTP error: {e}"
+                print(f"Error: {error_msg}")
+                
+                # Handle specific status codes
+                if e.response.status_code in [429, 503]:  # Too many requests or Service Unavailable
+                    retry_count += 1
+                    last_exception = e
+                    print(f"Rate limiting detected. Will retry ({retry_count}/{MAX_RETRIES})...")
+                else:
+                    # For other HTTP errors, don't retry
+                    raise Exception(error_msg)
+                    
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                # Network-related errors are worth retrying
+                error_type = "timeout" if isinstance(e, requests.exceptions.Timeout) else "connection error"
+                error_msg = f"arXiv API {error_type}: {e}"
+                print(f"Error: {error_msg}")
+                
+                retry_count += 1
+                last_exception = e
+                print(f"Will retry ({retry_count}/{MAX_RETRIES})...")
+                
+            except Exception as e:
+                # For unexpected errors, don't retry
+                error_msg = f"Unexpected error fetching from arXiv: {str(e)}"
+                print(f"Error: {error_msg}")
+                raise Exception(error_msg)
+        
+        # If we exhausted all retries
+        if last_exception:
+            error_msg = f"Failed to fetch from arXiv after {MAX_RETRIES} attempts: {str(last_exception)}"
+            print(f"Error: {error_msg}")
+            raise Exception(error_msg)
 
     def extract_arxiv_pdf_text(self, arxiv_id):
         """
@@ -94,21 +186,130 @@ class ArxivRAG:
         return text
 
     def parse_arxiv_feed(self, feed_xml):
-        root = ET.fromstring(feed_xml)
-        entries = []
-        for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
-            title = entry.find("{http://www.w3.org/2005/Atom}title").text.strip()
-            summary = entry.find("{http://www.w3.org/2005/Atom}summary").text.strip()
-            link = entry.find("{http://www.w3.org/2005/Atom}id").text.strip()
-            arxiv_id = link.split('/')[-1]
-            full_text = self.extract_arxiv_pdf_text(arxiv_id)
-            entries.append({"title": title, "summary": summary, "link": link, "full_text": full_text, "arxiv_id": arxiv_id})
+        """
+        Parse arXiv XML feed with improved error handling.
+        """
+        try:
+            # Try to parse XML
+            root = ET.fromstring(feed_xml)
+            
+            # Define namespaces for extracting data
+            namespaces = {
+                'atom': 'http://www.w3.org/2005/Atom',
+                'arxiv': 'http://arxiv.org/schemas/atom'
+            }
+            
+            # Initialize an empty list to store paper information
+            papers = []
+            
+            # Find entries using namespace
+            entries = root.findall('.//atom:entry', namespaces)
+            if not entries:
+                print("Warning: No entries found in arXiv response")
+                print(f"Response preview: {feed_xml[:200]}...")
+                return []
+                
+            print(f"Found {len(entries)} papers in arXiv response")
+            
+            # Process each entry (paper)
+            for entry in entries:
+                try:
+                    # Extract PDF link
+                    link = entry.find('./atom:link[@title="pdf"]', namespaces)
+                    pdf_link = link.get('href') if link is not None else None
+                    # If PDF link is not present, skip this entry
+                    if pdf_link is None:
+                        print("Warning: No PDF link found for entry")
+                        continue
+                    else:
+                        # If PDF link is present, proceed with extracting information
+                        if not self.is_already_indexed(pdf_link.split('/')[-1]):
+                            print(f"Not indexed paper: {pdf_link}")
+                            pass
+                        else:
+                            print(f"Skipping already indexed paper: {pdf_link}")
+                            continue
 
-        if entries:
-            print(f"Found {len(entries)} new papers in arXiv feed.")
-            print(f"Example paper: {entries[0]['title']} -- {entries[0]['summary']} -- ({entries[0]['link']})")
+                    # Extract basic information
+                    title = entry.find('./atom:title', namespaces)
+                    summary = entry.find('./atom:summary', namespaces)
+                    published = entry.find('./atom:published', namespaces)
+                    authors_elements = entry.findall('./atom:author/atom:name', namespaces)
+                    
+                    # Skip if essential elements are missing
+                    if title is None or summary is None:
+                        continue
+                        
+                    # Format title and summary (clean up newlines and spaces)
+                    title_text = title.text.replace('\n', ' ').strip() if title.text else "No title"
+                    summary_text = summary.text.replace('\n', ' ').strip() if summary.text else "No summary"
+                    
+                    # Format publication date
+                    pub_date = published.text if published is not None and published.text else "No date"
+                    if pub_date != "No date":
+                        # Try to parse and format date
+                        try:
+                            date_obj = datetime.fromisoformat(pub_date.replace('Z', '+00:00'))
+                            pub_date = date_obj.strftime("%Y-%m-%d")
+                        except (ValueError, TypeError) as e:
+                            print(f"Warning: Could not parse date '{pub_date}': {e}")
+                    
+                    # Extract authors
+                    authors = [author.text for author in authors_elements if author.text]
+                    author_text = ", ".join(authors) if authors else "Unknown"
+                    
 
-        return entries
+                    # Download and extract text from the PDF
+                    try:
+                        #full_text = self.extract_arxiv_pdf_text(entry.get('id', '').split('/')[-1])
+                        full_text = "Extracted text from PDF for demonstration purposes will implement later"
+                    except Exception as e:
+                        print(f"Error extracting PDF text: {e}")
+                        full_text = "No text extracted"
+
+                    # Create a formatted entry for the paper
+                    paper_info = {
+                        'title': title_text,
+                        'summary': summary_text,
+                        'authors': author_text,
+                        'published_date': pub_date,
+                        'pdf_link': pdf_link,
+                        'full_text': full_text
+                    }
+
+                    print(f"Processed paper: -->  {paper_info}")
+
+                    papers.append(paper_info)
+                except Exception as e:
+                    # If processing a specific paper fails, log the error but continue with others
+                    print(f"Error processing a paper entry: {e}")
+                    continue
+            
+            # Return the list of papers
+            return papers
+            
+        except ET.ParseError as e:
+            error_msg = f"XML parsing error: {str(e)}"
+            line_number = getattr(e, 'position', (0, 0))[0]
+            print(f"Error: {error_msg} at line {line_number}")
+            
+            # Try to show the problematic XML around the error
+            if line_number > 0:
+                lines = feed_xml.split('\n')
+                if line_number <= len(lines):
+                    context_start = max(0, line_number - 2)
+                    context_end = min(len(lines), line_number + 2)
+                    print("XML context around error:")
+                    for i in range(context_start, context_end):
+                        print(f"{i+1}: {lines[i]}")
+            
+            raise Exception(error_msg)
+            
+        except Exception as e:
+            error_msg = f"Error parsing arXiv response: {str(e)}"
+            print(f"Error: {error_msg}")
+            print(f"Response preview: {feed_xml[:200]}...")
+            raise Exception(error_msg)
 
     def is_already_indexed(self, link):
         result, _ = self.qdrant_client.scroll(
@@ -125,31 +326,33 @@ class ArxivRAG:
         nodes = []
         paper_summaries = []
         for paper in entries:
-            if self.is_already_indexed(paper['link']):
-                print(f"Skipping already indexed paper: {paper['title']}")
-                continue
+            print(f"Processing paper: {paper['title']} inside create_nodes_from_papers")
             # Create a summary for the paper
             summary_snippet = paper['summary'][:SHORT_SUMMARY_LENGTH]
             last_index = summary_snippet.rindex(".") if "." in summary_snippet else len(summary_snippet)
-            short_summary = summary_snippet[:last_index] + "..." if len(summary_snippet) > SHORT_SUMMARY_LENGTH else summary_snippet            
-            paaper_summary = f"📄 Title: {paper['title']}\n 🔗 link: {paper['link']}\n 📝papaer_summary: {short_summary}\n\n"
-            paper_summaries.append(paaper_summary)
+            short_summary = summary_snippet[:last_index] + "..." if len(summary_snippet) > SHORT_SUMMARY_LENGTH else summary_snippet
+            paper_summary = f"📄 Title: {paper['title']}\n 🔗 link: {paper['pdf_link']}\n authors: {paper['authors']}\n published_date: {paper['published_date']}\n 📝paper_summary: {short_summary}\n\n"
+            paper_summaries.append(paper_summary)
 
+            print(f"Creating nodes for paper: {paper['title']} before chunking")
 
-            text = f"Title: {paper['title']}\npapaer_summary: {paper['summary']}\nlink: {paper['link']}\n\nFull Text:\n{paper['full_text']}"
+            text = f"Title: {paper['title']}\paper_summary: {paper['summary']}\nlink: {paper['pdf_link']}\nauthors: {paper['authors']}\published_date: {paper['published_date']}\n\n\nFull Text:\n{paper['full_text']}"
             chunks = self.chunk_text(text, chunk_size)
             for idx, chunk in enumerate(chunks):
                 node = TextNode(
                     text=chunk,
                     metadata={
                         "title": paper['title'],
-                        "papaer_summary": paper['summary'],
-                        "link": paper['link'],
+                        "paper_summary": paper['summary'],
+                        "link": paper['pdf_link'],
+                        "authors": paper['authors'],
                         "chunk": idx + 1
                     }
                 )
                 node.node_id = str(uuid.uuid4())
                 nodes.append(node)
+            
+            print(f"Created {len(chunks)} nodes for paper: {paper['title']}")
         return nodes, paper_summaries
 
     def vectorize_and_store(self, nodes):
@@ -244,36 +447,74 @@ def get_lazy_load_and_query(llm):
         print(f"Fetching relevant papers for query: '{user_question}'")
 
         retrieved_nodes = []
-        llm_summary = "No relevant papers found."
-        if not rag.vector_store_has_documents(user_question):
-            feed = rag.fetch_arxiv_feed(query=user_question)
-            entries = rag.parse_arxiv_feed(feed)
-            nodes, paper_summaries = rag.create_nodes_from_papers(entries)
-            if nodes:
-                # Initialize Qdrant vector store
-                print(f"Vector store initialized with collection '{COLLECTION_NAME}'")
-                print(f"Number of new papers to index: {len(nodes)}")
-                thread = Thread(target=rag.vectorize_and_store, args=(nodes,))
-                thread.start()            
-                return paper_summaries
+        try:
+            if not rag.vector_store_has_documents(user_question):
+                try:
+                    feed = rag.fetch_arxiv_feed(query=user_question)
+                    entries = rag.parse_arxiv_feed(feed)
+                    
+                    if not entries:
+                        return ["I couldn't find any relevant papers on arXiv for your query. Could you try rephrasing or using more specific keywords?"]
+
+                    print(f"Found {len(entries)} new papers to index.")
+                    # Create nodes from the fetched papers    
+                    nodes, paper_summaries = rag.create_nodes_from_papers(entries)
+                    if nodes:
+                        # Initialize Qdrant vector store
+                        print(f"Vector store initialized with collection '{COLLECTION_NAME}'")
+                        print(f"Number of new papers to index: {len(nodes)}")
+                        thread = Thread(target=rag.vectorize_and_store, args=(nodes,))
+                        thread.start()            
+                        return paper_summaries
+                    else:
+                        print("No new papers to index.")
+                        return ["I found some papers, but they were already in my database. Let me search for relevant information..."]
+                except Exception as e:
+                    error_msg = str(e)
+                    print(f"Error fetching from arXiv: {error_msg}")
+                    
+                    # Provide specific error messages based on the error type
+                    if "503" in error_msg or "Service Unavailable" in error_msg:
+                        return ["I'm currently experiencing difficulty connecting to the arXiv research database due to high traffic or temporary maintenance. Please try again in a few minutes. In the meantime, I can answer based on my existing knowledge."]
+                    elif "429" in error_msg or "Too Many Requests" in error_msg:
+                        return ["I've reached the rate limit for arXiv's API. This typically happens when there are many research requests in a short period. Please try again in a few minutes."]
+                    elif "timeout" in error_msg.lower():
+                        return ["The connection to arXiv's research database timed out. This might be due to network issues or high server load. Please try again shortly."]
+                    else:
+                        return [f"I encountered an issue connecting to arXiv: {error_msg}. Let me try to answer based on my existing knowledge instead."]
+
+            print("Vector store has documents, querying Qdrant...")
+            retrieved_nodes = rag.query_qdrant(user_question)
+
+            if not retrieved_nodes:
+                return ["I couldn't find any specific papers that match your query in my database. Could you try a different question?"]
+
+            paper_summaries = []
+            for node in retrieved_nodes:
+                metadata = node.metadata or {}
+                title = metadata.get("title", "Untitled")
+                summary = metadata.get("papaer_summary", "No summary available")
+                summary_snippet = summary[:SHORT_SUMMARY_LENGTH]
+                last_index = summary_snippet.rindex(".") if "." in summary_snippet else len(summary_snippet)
+                short_summary = summary[:last_index] + "..." if len(summary) > SHORT_SUMMARY_LENGTH else summary            
+                link = metadata.get("link", "No link")
+                paper_summaries.append(f"📄 {title}\n\n🔗 {link}\n\n📝 {short_summary}\n{node.get_content()}")
+
+            return paper_summaries
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"Unexpected error in lazy_load_and_query: {error_msg}")
+            
+            # Provide more specific error messages based on keywords in the error
+            if "Failed to fetch from arXiv" in error_msg:
+                return ["I'm having trouble connecting to the arXiv research database at the moment. This could be due to network issues or rate limiting. I can still help answer your question based on my general knowledge. What would you like to know?"]
+            elif "vector store" in error_msg.lower() or "qdrant" in error_msg.lower():
+                return ["I'm experiencing an issue with my research database. This is likely a temporary problem. Let me try to answer based on my general knowledge instead."]
+            elif "timeout" in error_msg.lower():
+                return ["The operation timed out while processing your request. This might be due to the complexity of your query or temporary server load. Could you try a simpler question?"]
             else:
-                print("No new papers to index.")
-
-        print("Vector store has documents, querying Qdrant...")
-        retrieved_nodes = rag.query_qdrant(user_question)
-
-        paper_summaries = []
-        for node in retrieved_nodes:
-            metadata = node.metadata or {}
-            title = metadata.get("title", "Untitled")
-            summary = metadata.get("papaer_summary", "No summary available")
-            summary_snippet = summary[:SHORT_SUMMARY_LENGTH]
-            last_index = summary_snippet.rindex(".") if "." in summary_snippet else len(summary_snippet)
-            short_summary = summary[:last_index] + "..." if len(summary) > SHORT_SUMMARY_LENGTH else summary            
-            link = metadata.get("link", "No link")
-            paper_summaries.append(f"📄 {title}\n\n🔗 {link}\n\n📝 {short_summary}\n{node.get_content()}")
-
-        return paper_summaries
+                return [f"I encountered an unexpected error while researching your question. Please try again with a different query. Technical details: {error_msg}"]
 
 
 
