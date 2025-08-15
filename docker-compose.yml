@@ -93,21 +93,25 @@ services:
     # working_dir: /app
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
-  # frontend:
-  #   platform: linux/amd64
-  #   build:
-  #     context: ./frontend
-  #   ports:
-  #     - "5173:5173"
-  #   working_dir: /app
-  #   environment:
-  #     - NODE_ENV=production
-  #   depends_on:
-  #     - backend
+  frontend:
+    platform: linux/amd64
+    build:
+      context: ./frontend
+    ports:
+      - "5173:5173"
+    working_dir: /app
+    environment:
+      - NODE_ENV=production
+      - VITE_API_BASE_URL=http://localhost:8000
+      - VITE_DEFAULT_USER_ID=${FIRST_SUPERUSER:-admin}
+    depends_on:
+      backend:
+        condition: service_healthy
 volumes:
   qdrant_data:
     driver: local

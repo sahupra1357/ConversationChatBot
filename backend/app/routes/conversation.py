@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select, func
 from app.deps import SessionDep
-from app.crud import get_converstion_by_user_id, get_conversation_by_id, create_conversation, delete_conversation
+from app.crud import get_converstion_by_user_id, get_conversation_by_id, create_conversation, delete_conversation, delete_message_by_conversation_id
 from app.model import InsertConversation, Conversations
 from app.model import Users
 
@@ -47,10 +47,11 @@ def delete_conversation_by_id(
     """
     Delete a conversation by its ID.
     """
-    conversation = get_conversation_by_id(session=session, conversation_id=conversationId)
-    if not conversation:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+    # first delete all messages in the conversation
+    delete_message_by_conversation_id(session=session, conversation_id=conversationId)
     
+    # then delete the conversation itself
+
     delete_conversation(session=session, conversation_id=conversationId)
     return {"detail": "Conversation deleted successfully."}
 

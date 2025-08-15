@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from requests import session
 from sqlmodel import Session, select, func
 from app.deps import SessionDep
 from app.crud import create_message, get_messages_by_conversation_id
@@ -35,3 +36,20 @@ def get_messages_by_conversation_id_route(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No messages found for this conversation.")
     return messages
 
+@router.delete("/messages/{conversationId}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_messages_by_conversation_id(
+    conversationId: str,
+    session: SessionDep
+):
+    """
+    Delete all messages for a specific conversation.
+    """
+    messages = get_messages_by_conversation_id(session=session, conversation_id=conversationId)
+    if not messages:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No messages found for this conversation.")
+    
+    for message in messages:
+        session.delete(message)
+    
+    session.commit()
+    return {"detail": "All messages deleted successfully."} 
