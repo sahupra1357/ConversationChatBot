@@ -44,6 +44,30 @@ def getUserById(*, session: Session, user_id: str) -> Users | None:
     result = session.exec(statement).first()
     return result
 
+def getUserByUsername(*, session: Session, username: str) -> Users | None:
+    """
+    Get a user by username with improved logging and error handling
+    """
+    if not username:
+        print("Warning: Empty username provided to getUserByUsername")
+        return None
+        
+    try:
+        print(f"Looking up user with username: {username}")
+        statement = select(Users).where(Users.username == username)
+        result = session.exec(statement).first()
+        
+        if result:
+            print(f"Found user: {result.username} with ID: {result.id}")
+        else:
+            print(f"No user found with username: {username}")
+            
+        return result
+    except Exception as e:
+        print(f"Error in getUserByUsername: {str(e)}")
+        # Re-raise the exception to be handled by the caller
+        raise
+
 def get_messages_by_conversation_id(*, session: Session, conversation_id: str) -> list[Messages]:
     statement = select(Messages).where(Messages.conversation_id == conversation_id)
     results = session.exec(statement).all()
@@ -56,3 +80,11 @@ def create_message(*, session: Session, message: InsertMessage) -> Messages:
     session.refresh(db_obj)
     return db_obj   
 
+def delete_message_by_conversation_id(*, session: Session, conversation_id: str) -> None:
+    # Using direct delete statement for bulk deletion - more efficient
+    from sqlalchemy import delete
+    delete_stmt = delete(Messages).where(Messages.conversation_id == conversation_id)
+    session.execute(delete_stmt)
+    session.commit()
+    
+    
