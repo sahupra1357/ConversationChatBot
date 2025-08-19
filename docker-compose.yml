@@ -13,8 +13,8 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage  # Persistent storage for Qdrant data
     healthcheck:
-      #test: ["CMD", "curl", "-f", "http://host.docker.internal:6333/collections"]
-      test: ["CMD", "curl", "-f", "http://localhost:6333/collections"]
+      test: ["CMD", "curl", "-f", "http://host.docker.internal:6333/collections"]
+      #test: ["CMD", "curl", "-f", "http://localhost:6333/collections"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -62,6 +62,56 @@ services:
       - POSTGRES_SERVER=${POSTGRES_SERVER?Variable not set}
       - POSTGRES_PORT=${POSTGRES_PORT?Variable not set}
 
+  ollama:
+    image: ollama/ollama:latest
+    restart: always
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama  # Persistent storage for Ollama models
+    healthcheck:
+      # More forgiving healthcheck - exit 0 ensures it doesn't fail the container
+      test: ["CMD-SHELL", "curl -s http://localhost:11434/api/tags > /dev/null || exit 0"]
+      interval: 30s
+      timeout: 15s
+      retries: 20
+      start_period: 120s  # Give more time for initial startup, especially for model loading
+    # Apple Silicon (M1/M2/M3/M4) uses Metal API natively
+    # and doesn't need explicit GPU reservation in Docker
+    platform: ${OLLAMA_PLATFORM:-linux/amd64}
+    # Memory limit is still useful
+    deploy:
+      resources:
+        limits:
+          memory: 8G  # Reduced from 16G to be more compatible with different systems
+    environment:
+      - OLLAMA_HOST_CPU_COUNT=2  # Explicitly set CPU count to avoid auto-detection issues
+    # Install curl when container starts
+    # command: sh -c "apt-get update && apt-get install -y curl && ollama serve"
+    profiles:
+      - ollama
+      - all
+          
+  ollama-model-loader:
+    image: curlimages/curl:latest
+    depends_on:
+      ollama:
+        condition: service_started
+        required: true
+    volumes:
+      - ./scripts:/scripts
+    environment:
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+      - MAX_RETRIES=30
+      - RETRY_INTERVAL=15
+    # Add a longer sleep to ensure Ollama is fully initialized
+    # command: ["/bin/sh", "-c", "echo 'Waiting for Ollama to initialize...' && sleep 60 && chmod +x /scripts/download_ollama_models.sh && /scripts/download_ollama_models.sh"]
+    profiles:
+      - ollama
+      - all
+    
   backend:
     image: '${DOCKER_IMAGE_BACKEND?Variable not set}:${TAG-latest}'
     restart: always
@@ -80,11 +130,18 @@ services:
           restart: true
       prestart:
           condition: service_completed_successfully
+      # Make Ollama completely optional with no health check dependency
+      # ollama:
+      #     condition: service_started
+      #     required: false
     environment:
       QDRANT_HOST: "host.docker.internal"  # Magic DNS for host machine
       QDRANT_PORT: "6333"    
       FIRST_SUPERUSER: ${FIRST_SUPERUSER?Variable not set}
       FIRST_SUPERUSER_PASSWORD: ${FIRST_SUPERUSER_PASSWORD?Variable not set}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-coder:latest}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
     # volumes:
     #   - ./backend:/app:delegated
     #command: ["python", "backend.py"]
@@ -116,6 +173,8 @@ volumes:
   qdrant_data:
     driver: local
   app-db_data:
+  ollama_data:
+    driver: local
 
 # configs:
 #   qdrant_config:

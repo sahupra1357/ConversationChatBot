@@ -1,5 +1,4 @@
 from fastapi import Form, Body
-from llama_index.llms.openai import OpenAI
 from llama_index.core.settings import Settings
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.prompts import PromptTemplate
@@ -7,6 +6,7 @@ import os
 from app.config import local_settings
 from llama_index.core.agent.workflow import ReActAgent
 from app.arxiv_rag import get_lazy_load_and_query
+from app.llm_providers import get_llm
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -18,12 +18,21 @@ class ChatRequest(BaseModel):
     message_history: Optional[List[Dict[str, Any]]] = None
 
 
-# Initialize OpenAI LLM and LlamaIndex ReActAgent
-llm = OpenAI(model=local_settings.OPENAI_MODEL, temperature=0.0, max_tokens=512)
+# Initialize LLM based on configuration
+llm = get_llm(
+    provider=local_settings.LLM_PROVIDER,
+    model_name=local_settings.OLLAMA_MODEL if local_settings.LLM_PROVIDER.lower() == "ollama" else local_settings.OPENAI_MODEL,
+    temperature=local_settings.LLM_TEMPERATURE,
+    max_tokens=local_settings.LLM_MAX_TOKENS,
+    base_url=local_settings.OLLAMA_BASE_URL if local_settings.LLM_PROVIDER.lower() == "ollama" else None,
+    context_window=local_settings.LLM_CONTEXT_WINDOW if local_settings.LLM_PROVIDER.lower() == "ollama" else None
+)
+
+# Configure LlamaIndex settings
 Settings.llm = llm
 Settings.node_parser = SentenceSplitter(chunk_size=512, chunk_overlap=20)
-Settings.num_output = 512
-Settings.context_window = 3900
+Settings.num_output = local_settings.LLM_MAX_TOKENS
+Settings.context_window = local_settings.LLM_CONTEXT_WINDOW
 
 def read_prompt_file(file_path):
     """Read the system prompt from a file."""
