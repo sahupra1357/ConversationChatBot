@@ -5,12 +5,21 @@ import uuid
 import xml.etree.ElementTree as ET
 from threading import Thread
 from datetime import datetime
+import os
+import time
+import random
+import json
+import urllib.parse
+from typing import Dict, List, Optional, Tuple
+
 from llama_index.core import VectorStoreIndex, ServiceContext
 from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import VectorParams, Distance
 from llama_index.core.schema import TextNode
+from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.settings import Settings
@@ -18,44 +27,41 @@ from llama_index.core.schema import TextNode
 from llama_index.core.node_parser import SentenceSplitter
 from PyPDF2 import PdfReader
 from typing import Optional, List, Dict, Any
-from llama_index.llms.openai import OpenAI
+from llama_index.core.llms import LLM
+from app.llm_providers import get_llm
 import io
 import time
 import random
 
 import os
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 # Load environment variables
-load_dotenv()
+#load_dotenv()
 from app.observability import init_observability
+from app.config import local_settings
 # Initialize observability
 init_observability()
 
-# Constants for retry logic
-MAX_RETRIES = 5
-RETRY_DELAY_BASE = 1.5  # seconds
-RETRY_JITTER = 1.0  # random jitter in seconds to add to delay
-
-
-QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
-QDRANT_PORT = int(os.getenv("QDRANT_PORT", 6333))
-COLLECTION_NAME = os.getenv("COLLECTION_NAME", "arxiv_ml_papers")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", 2))
-SHORT_SUMMARY_LENGTH = int(os.getenv("SHORT_SUMMARY_LENGTH", 100))
-VECTOR_DIM = int(os.getenv("VECTOR_DIM", 1536))
+QDRANT_HOST = local_settings.QDRANT_HOST
+QDRANT_PORT = local_settings.QDRANT_PORT
+COLLECTION_NAME = local_settings.COLLECTION_NAME
+OPENAI_EMBED_MODEL = local_settings.OPENAI_EMBED_MODEL
+OLLAMA_EMBED_MODEL = local_settings.OLLAMA_EMBED_MODEL
+MAX_RESULTS = local_settings.MAX_RESULTS
+SHORT_SUMMARY_LENGTH = local_settings.SHORT_SUMMARY_LENGTH
+VECTOR_DIM = local_settings.VECTOR_DIM
 
 # Retry configuration for external API calls
-MAX_RETRIES = 3
-RETRY_DELAY_BASE = 2  # Base delay in seconds between retries
-RETRY_JITTER = 0.5  # Random jitter added to retry delay
+MAX_RETRIES = local_settings.MAX_RETRIES
+RETRY_DELAY_BASE = local_settings.RETRY_DELAY_BASE
+RETRY_JITTER = local_settings.RETRY_JITTER
 
 class ArxivRAG:
     def __init__(self,
                  qdrant_host=QDRANT_HOST,
                  qdrant_port=QDRANT_PORT,
                  collection_name=COLLECTION_NAME,
-                 embed_model_name=EMBED_MODEL,
+                 embed_model_name=OLLAMA_EMBED_MODEL if local_settings.LLM_PROVIDER.lower() == "ollama" else OPENAI_EMBED_MODEL,
                  max_results=MAX_RESULTS,
                  vector_dim=VECTOR_DIM):
         """ Initialize the ArxivRAG system.
@@ -71,7 +77,14 @@ class ArxivRAG:
         self.collection_name = collection_name
         self.max_results = max_results
 
-        self.embed_model = OpenAIEmbedding(model=embed_model_name)
+        # Choose the embedding model based on the name
+        if "bge" in embed_model_name:
+            print(f"Using HuggingFace embedding model: {embed_model_name}")
+            self.embed_model = HuggingFaceEmbedding(model_name=embed_model_name)
+        else:
+            print(f"Using OpenAI embedding model: {embed_model_name}")
+            self.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
+            
         Settings.embed_model = self.embed_model
         Settings.node_parser = SentenceSplitter(chunk_size=512, chunk_overlap=20)
         Settings.num_output = 512
@@ -261,8 +274,8 @@ class ArxivRAG:
 
                     # Download and extract text from the PDF
                     try:
-                        #full_text = self.extract_arxiv_pdf_text(entry.get('id', '').split('/')[-1])
-                        full_text = "Extracted text from PDF for demonstration purposes will implement later"
+                        full_text = self.extract_arxiv_pdf_text(entry.get('id', '').split('/')[-1])
+                        # full_text = "Extracted text from PDF for demonstration purposes will implement later"
                     except Exception as e:
                         print(f"Error extracting PDF text: {e}")
                         full_text = "No text extracted"
@@ -277,7 +290,7 @@ class ArxivRAG:
                         'full_text': full_text
                     }
 
-                    print(f"Processed paper: -->  {paper_info}")
+                    #print(f"Processed paper: -->  {paper_info}")
 
                     papers.append(paper_info)
                 except Exception as e:
@@ -326,7 +339,7 @@ class ArxivRAG:
         nodes = []
         paper_summaries = []
         for paper in entries:
-            print(f"Processing paper: {paper['title']} inside create_nodes_from_papers")
+            #print(f"Processing paper: {paper['title']} inside create_nodes_from_papers")
             # Create a summary for the paper
             summary_snippet = paper['summary'][:SHORT_SUMMARY_LENGTH]
             last_index = summary_snippet.rindex(".") if "." in summary_snippet else len(summary_snippet)
@@ -334,9 +347,9 @@ class ArxivRAG:
             paper_summary = f"📄 Title: {paper['title']}\n 🔗 link: {paper['pdf_link']}\n authors: {paper['authors']}\n published_date: {paper['published_date']}\n 📝paper_summary: {short_summary}\n\n"
             paper_summaries.append(paper_summary)
 
-            print(f"Creating nodes for paper: {paper['title']} before chunking")
+            #print(f"Creating nodes for paper: {paper['title']} before chunking")
 
-            text = f"Title: {paper['title']}\paper_summary: {paper['summary']}\nlink: {paper['pdf_link']}\nauthors: {paper['authors']}\published_date: {paper['published_date']}\n\n\nFull Text:\n{paper['full_text']}"
+            text = f"Title: {paper['title']}\npaper_summary: {paper['summary']}\nlink: {paper['pdf_link']}\nauthors: {paper['authors']}\npublished_date: {paper['published_date']}\n\n\nFull Text:\n{paper['full_text']}"
             chunks = self.chunk_text(text, chunk_size)
             for idx, chunk in enumerate(chunks):
                 node = TextNode(
@@ -352,7 +365,7 @@ class ArxivRAG:
                 node.node_id = str(uuid.uuid4())
                 nodes.append(node)
             
-            print(f"Created {len(chunks)} nodes for paper: {paper['title']}")
+            #print(f"Created {len(chunks)} nodes for paper: {paper['title']}")
         return nodes, paper_summaries
 
     def vectorize_and_store(self, nodes):
@@ -393,20 +406,24 @@ class ArxivRAG:
 
         return retrieved_nodes
 
-    def summarize_with_llm(self, context: str, question: str, llm: Optional[OpenAI] = None):
+    def summarize_with_llm(self, context: str, question: str, llm: Optional[LLM] = None):
         """
         Generate a summary of the context based on the user's question using the same LLM used in the agent.
 
         Args:
             context (str): Extracted content from vector DB
             question (str): User's question
-            llm (OpenAI, optional): Shared LLM instance
+            llm (LLM, optional): Shared LLM instance
 
         Returns:
             str: Summary generated by the LLM
         """
         if llm is None:
-            raise ValueError("LLM instance is required")
+            # Use default LLM from settings if none provided
+            llm = get_llm(
+                provider=local_settings.LLM_PROVIDER,
+                model_name=local_settings.OLLAMA_MODEL if local_settings.LLM_PROVIDER.lower() == "ollama" else local_settings.OPENAI_MODEL
+            )
 
         prompt = f"""You are a research assistant. Given the following academic content, answer the question concisely.
 
@@ -424,9 +441,27 @@ class ArxivRAG:
 
 
 # --- Lazy Load Function ---
-def get_lazy_load_and_query(llm):
+def get_lazy_load_and_query(llm: Optional[LLM] = None):
+    """
+    Get a function that can lazy load papers and query them.
+    
+    Args:
+        llm (LLM, optional): LLM instance to use for summarization
+        
+    Returns:
+        function: A function that can be used as a tool for the agent
+    """
+    if llm is None:
+        # Use default LLM from settings
+        llm = get_llm(
+            provider=local_settings.LLM_PROVIDER,
+            model_name=local_settings.OLLAMA_MODEL if local_settings.LLM_PROVIDER.lower() == "ollama" else local_settings.OPENAI_MODEL
+        )
 
-    rag = ArxivRAG()
+    # Use the proper embedding model based on configuration
+    embed_model=OLLAMA_EMBED_MODEL if local_settings.LLM_PROVIDER.lower() == "ollama" else OPENAI_EMBED_MODEL,
+
+    rag = ArxivRAG(embed_model_name=embed_model)
     def lazy_load_and_query(user_question: str):
         """
         Handle a user query by checking the vector store first and falling back to LLM if needed.
@@ -456,18 +491,18 @@ def get_lazy_load_and_query(llm):
                     if not entries:
                         return ["I couldn't find any relevant papers on arXiv for your query. Could you try rephrasing or using more specific keywords?"]
 
-                    print(f"Found {len(entries)} new papers to index.")
+                    # print(f"Found {len(entries)} new papers to index.")
                     # Create nodes from the fetched papers    
                     nodes, paper_summaries = rag.create_nodes_from_papers(entries)
                     if nodes:
                         # Initialize Qdrant vector store
-                        print(f"Vector store initialized with collection '{COLLECTION_NAME}'")
-                        print(f"Number of new papers to index: {len(nodes)}")
+                        #print(f"Vector store initialized with collection '{COLLECTION_NAME}'")
+                        #print(f"Number of new papers to index: {len(nodes)}")
                         thread = Thread(target=rag.vectorize_and_store, args=(nodes,))
                         thread.start()            
                         return paper_summaries
                     else:
-                        print("No new papers to index.")
+                        #print("No new papers to index.")
                         return ["I found some papers, but they were already in my database. Let me search for relevant information..."]
                 except Exception as e:
                     error_msg = str(e)
@@ -483,7 +518,7 @@ def get_lazy_load_and_query(llm):
                     else:
                         return [f"I encountered an issue connecting to arXiv: {error_msg}. Let me try to answer based on my existing knowledge instead."]
 
-            print("Vector store has documents, querying Qdrant...")
+            #print("Vector store has documents, querying Qdrant...")
             retrieved_nodes = rag.query_qdrant(user_question)
 
             if not retrieved_nodes:
@@ -515,21 +550,6 @@ def get_lazy_load_and_query(llm):
                 return ["The operation timed out while processing your request. This might be due to the complexity of your query or temporary server load. Could you try a simpler question?"]
             else:
                 return [f"I encountered an unexpected error while researching your question. Please try again with a different query. Technical details: {error_msg}"]
-
-
-
-        # Concatenate retrieved content for LLM summarization
-        # context = "\n\n".join(node.get_content() for node in retrieved_nodes)
-        # print(f"Retrieved {len(retrieved_nodes)} relevant nodes from vector store.")
-        # print(f"Context length: {len(context)} characters")
-        # return context
-        # max_context_chars = 6000
-        # if len(context) > max_context_chars:
-        #     context = context[:max_context_chars]
-
-        # llm_summary = rag.summarize_with_llm(context, user_question, llm=llm)
-
-        # return llm_summary
     
     return lazy_load_and_query
 

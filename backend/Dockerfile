@@ -30,8 +30,11 @@ RUN apt-get update && apt-get install -y \
     libpq-dev \
     gcc \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
+# For Ollama connectivity
+ENV OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
 
 # Install dependencies
 # Ref: https://docs.astral.sh/uv/guides/integration/docker/#intermediate-layers
@@ -54,11 +57,10 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync
 
+# Make sure HuggingFace embeddings are explicitly installed
+RUN pip install llama-index-embeddings-huggingface sentence-transformers torch --no-cache-dir
+
 RUN uv pip install uvicorn
 RUN which uvicorn || echo "Uvicorn not found"    
-# Wait for Qdrant to be ready
-#CMD ["sh", "-c", "python wait_for_qdrant.py && uvicorn backend:app --host 0.0.0.0 --port 8000"]
-#CMD ["sh", "-c", "uvicorn backend:app --host 0.0.0.0 --port 8000"]
-#CMD ["uvicorn app.backend:app --host 0.0.0.0 --port 8000"]
+
 CMD ["uvicorn", "app.backend:app", "--host", "0.0.0.0", "--port", "8000"]
-#CMD ["/app/.venv/bin/uvicorn", "app.backend:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -8,6 +8,9 @@ llama-index
 llama-index-core
 llama-index-callbacks-arize-phoenix
 llama-index-vector-stores-qdrant
+llama-index-llms-ollama
+llama-index-embeddings-huggingface
+sentence-transformers
 openai
 opentelemetry-api
 passlib
