@@ -184,11 +184,12 @@ class ArxivRAG:
             print(f"Error: {error_msg}")
             raise Exception(error_msg)
 
-    def extract_arxiv_pdf_text(self, arxiv_id):
+    def extract_arxiv_pdf_text(self, pdf_url):
         """
         Download an arXiv PDF by ID and extract its text, all in memory.
         """
-        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+        # pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+        # response = requests.get(pdf_url)
         response = requests.get(pdf_url)
         response.raise_for_status()
         pdf_filelike = io.BytesIO(response.content)
@@ -274,7 +275,7 @@ class ArxivRAG:
 
                     # Download and extract text from the PDF
                     try:
-                        full_text = self.extract_arxiv_pdf_text(entry.get('id', '').split('/')[-1])
+                        full_text = self.extract_arxiv_pdf_text(pdf_link)
                         # full_text = "Extracted text from PDF for demonstration purposes will implement later"
                     except Exception as e:
                         print(f"Error extracting PDF text: {e}")

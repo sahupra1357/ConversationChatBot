@@ -62,6 +62,12 @@ A full-stack AI-powered chatbot application with real-time research capabilities
    - Download the necessary models if using Ollama
    - Provide URLs to access the application
 
+3. If you need to reset and start fresh:
+   ```bash
+   ./scripts/cleanup.sh
+   ```
+   This will completely clean up all Docker resources.
+
 ### Manual Setup
 
 1. Clone the repository:
@@ -158,6 +164,13 @@ If you encounter connection errors when trying to use Ollama:
    sudo launchctl unload ~/Library/LaunchAgents/com.ollama.ollama.plist
    ```
 
+5. If everything else fails, try a complete reset:
+   ```bash
+   # Completely reset Docker environment and start fresh
+   ./scripts/cleanup.sh
+   ./scripts/startup.sh
+   ```
+
 #### Model Download Issues
 If models aren't downloading properly:
 
@@ -175,6 +188,75 @@ If models aren't downloading properly:
    ```bash
    docker exec $(docker ps -q -f name=ollama-model-loader) curl -X POST http://ollama:11434/api/pull -d '{"name": "deepseek-r1:8b"}'
    ```
+
+### Utility Scripts
+
+The project includes several utility scripts to make management easier:
+
+#### startup.sh
+
+The `startup.sh` script automates the initial setup and deployment of the application:
+
+```bash
+./scripts/startup.sh
+```
+
+This script:
+- Checks if Docker and Docker Compose are installed
+- Creates a `.env` file if it doesn't exist
+- Prompts for configuration (Ollama or OpenAI)
+- Detects your hardware (Apple Silicon vs Intel/AMD) and configures accordingly
+- Stops any existing containers, removes images and volumes for a clean start
+- Starts the appropriate services based on your LLM provider choice
+- Downloads the necessary models if using Ollama (after 10-second initialization period)
+- Provides URLs to access the application when done
+
+#### cleanup.sh
+
+The `cleanup.sh` script provides a thorough cleanup of all Docker resources:
+
+```bash
+./scripts/cleanup.sh
+```
+
+This script:
+- Stops all running Docker containers
+- Removes all containers
+- Removes all Docker networks
+- Removes all Docker images
+- Removes all Docker volumes
+- Completely resets your Docker environment for a fresh start
+
+Use this script when you want to completely clean up your Docker environment, remove all containers, images, and volumes related to the project. This is useful for troubleshooting or when you want to start fresh.
+
+#### download_ollama_models.sh
+
+The `download_ollama_models.sh` script downloads required models to Ollama:
+
+```bash
+./scripts/download_ollama_models.sh
+```
+
+This script:
+- Connects to the Ollama service
+- Downloads the DeepSeek Coder model
+- Downloads the DeepSeek R1 8B model
+- Downloads the BGE-Large embedding model
+- Includes retry logic for reliability
+
+#### check_ollama_models.sh
+
+The `check_ollama_models.sh` script verifies Ollama model status:
+
+```bash
+./scripts/check_ollama_models.sh
+```
+
+This script:
+- Checks if the Ollama service is running
+- Lists all downloaded models
+- Reports if the required models are available
+- Provides troubleshooting guidance if models are missing
 
 ### Local Development
 
@@ -304,7 +386,8 @@ ConversationChatBot/
 │   │   └── ...
 │   └── ...
 ├── scripts/                 # Utility scripts
-│   ├── startup.sh           # Quick setup script
+│   ├── startup.sh           # Quick setup script for initial deployment
+│   ├── cleanup.sh           # Script to stop and clean up Docker resources
 │   ├── download_ollama_models.sh # Script to download models
 │   ├── check_ollama_models.sh # Script to check Ollama models
 │   ├── check_ollama.sh      # Interactive Ollama management tool
