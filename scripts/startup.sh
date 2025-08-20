@@ -80,3 +80,12 @@ echo "Setup complete! Your ConversationChatBot is now running."
 echo "- Frontend: http://localhost:5173"
 echo "- Backend API: http://localhost:8000"
 echo "- API Documentation: http://localhost:8000/docs"
+
+# If using Ollama, execute the download_ollama_models.sh script after a delay
+if grep -q "LLM_PROVIDER=ollama" .env; then
+    echo "Waiting 10 seconds for Ollama to initialize before downloading models..."
+    sleep 10
+    echo "Executing download_ollama_models.sh to ensure models are available..."
+    chmod +x ./scripts/download_ollama_models.sh
+    ./scripts/download_ollama_models.sh
+fi

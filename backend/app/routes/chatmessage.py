@@ -19,14 +19,22 @@ class ChatRequest(BaseModel):
 
 
 # Initialize LLM based on configuration
-llm = get_llm(
-    provider=local_settings.LLM_PROVIDER,
-    model_name=local_settings.OLLAMA_MODEL if local_settings.LLM_PROVIDER.lower() == "ollama" else local_settings.OPENAI_MODEL,
-    temperature=local_settings.LLM_TEMPERATURE,
-    max_tokens=local_settings.LLM_MAX_TOKENS,
-    base_url=local_settings.OLLAMA_BASE_URL if local_settings.LLM_PROVIDER.lower() == "ollama" else None,
-    context_window=local_settings.LLM_CONTEXT_WINDOW if local_settings.LLM_PROVIDER.lower() == "ollama" else None
-)
+if local_settings.LLM_PROVIDER.lower() == "ollama":
+    llm = get_llm(
+        provider=local_settings.LLM_PROVIDER,
+        model_name=local_settings.OLLAMA_MODEL,
+        temperature=local_settings.LLM_TEMPERATURE,
+        max_tokens=local_settings.LLM_MAX_TOKENS,
+        base_url=local_settings.OLLAMA_BASE_URL,
+        context_window=local_settings.LLM_CONTEXT_WINDOW
+    )
+else:  # OpenAI
+    llm = get_llm(
+        provider=local_settings.LLM_PROVIDER,
+        model_name=local_settings.OPENAI_MODEL,
+        temperature=local_settings.LLM_TEMPERATURE,
+        max_tokens=local_settings.LLM_MAX_TOKENS
+    )
 
 # Configure LlamaIndex settings
 Settings.llm = llm

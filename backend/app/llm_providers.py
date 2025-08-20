@@ -81,7 +81,10 @@ def get_llm(provider: str = "openai", **kwargs) -> LLM:
         ValueError: If provider is not supported
     """
     if provider.lower() == "openai":
-        return get_openai_llm(**kwargs)
+        # Filter out kwargs that are not supported by OpenAI
+        openai_kwargs = {k: v for k, v in kwargs.items() 
+                         if k in ['model_name', 'temperature', 'max_tokens']}
+        return get_openai_llm(**openai_kwargs)
     elif provider.lower() == "ollama":
         return get_ollama_llm(**kwargs)
     else:
